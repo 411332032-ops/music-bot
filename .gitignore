@@ -218,3 +218,7 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Music bot: runtime data (photos, records) must never be committed
+DATA_DIR/
+*.xlsx
