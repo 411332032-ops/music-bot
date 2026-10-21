@@ -139,7 +139,7 @@ flowchart LR
   1. 建立 Application 並新增 Bot，取得 **token**（機器人的密碼，見第 11 節）。
   2. 打開 **Message Content Intent**（白話：Discord 預設不讓機器人看訊息內容和附件，必須在後台特別勾選同意）。**沒開這個，機器人收到的圖片會是空的。**
   3. 把機器人邀請進你的 Server，權限只給：View Channel（看得到頻道）、Read Message History（讀歷史訊息）、Send Messages（發訊息）、Add Reactions（貼表情符號）。不要給管理員權限。
-  4. 在**指定那個頻道**單獨設定機器人的權限，其他頻道讓它看不到。
+  4. （選用）在**指定那個頻道**單獨設定機器人的權限。注意：新伺服器預設所有成員（含機器人）看得到所有公開頻道，所以這只是額外的保險；**真正限制只處理哪個頻道的，是程式裡的 `CHANNEL_ID`**。詳細步驟見 `docs/discord-bot-setup.md` 第 4-4 節。
 
 ### 3.4 呼叫 `claude -p`
 
