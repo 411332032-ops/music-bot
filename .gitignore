@@ -222,3 +222,6 @@ __marimo__/
 # Music bot: runtime data (photos, records) must never be committed
 DATA_DIR/
 *.xlsx
+
+# Music bot: default local DATA_DIR (./data) holds photos and records
+data/
