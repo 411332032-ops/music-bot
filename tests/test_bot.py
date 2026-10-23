@@ -14,6 +14,7 @@ import pytest
 from music_bot.bot import BotHandler, load_initialized_at, save_initialized_at
 from music_bot.models import Outcome
 from music_bot.pipeline import MAX_IMAGE_BYTES, ProcessResult
+from music_bot.storage import Stats
 
 CHANNEL = 111
 BOT_USER = SimpleNamespace(id=999, bot=True, display_name="Music-Recognition-Bot")
@@ -87,19 +88,35 @@ def music_outcome(**kw):
 
 
 class FakeProcessor:
-    def __init__(self, outcome=None, count=1):
+    def __init__(self, outcome=None, count=1, user_count=None):
         self.outcome = outcome or music_outcome()
         self.count = count
+        self.user_count = user_count
         self.calls = []
+        self.stats_calls = []
         self.error = None
+        self.stats_error = None
 
-    async def process(self, image, uploader, taken_at, caption=None, failure=None):
+    async def process(self, image, uploader, taken_at, caption=None, failure=None, uploader_id=""):
         self.calls.append(
-            {"image": image, "uploader": uploader, "taken_at": taken_at, "caption": caption, "failure": failure}
+            {
+                "image": image,
+                "uploader": uploader,
+                "taken_at": taken_at,
+                "caption": caption,
+                "failure": failure,
+                "uploader_id": uploader_id,
+            }
         )
         if self.error:
             raise self.error
-        return ProcessResult(self.outcome, self.count)
+        return ProcessResult(self.outcome, self.count, self.user_count)
+
+    async def stats(self, uploader_id, today):
+        self.stats_calls.append({"uploader_id": uploader_id, "today": today})
+        if self.stats_error:
+            raise self.stats_error
+        return Stats(5, 2, 2, 1, 3, [("優里", 3)], [("J-Pop", 4)])
 
 
 async def make(processor=None, **kw):
@@ -582,3 +599,89 @@ async def test_message_finalized_is_logged_with_its_symbols(caplog):
     with caplog.at_level(logging.INFO, logger="music_bot.bot"):
         await run(h, m)
     assert any(f"訊息 {m.id}" in msg and "全部處理完" in msg and "✅" in msg for msg in caplog.messages)
+
+
+# ---------- 上傳者 ID 與「你今天已紀錄幾首」 ----------
+
+
+async def test_uploader_id_is_passed_to_the_processor_as_text():
+    h, proc = await make()
+    m = FakeMessage(author=SimpleNamespace(id=1234567890123456789, bot=False, display_name="小明"))
+    await run(h, m)
+    assert proc.calls[0]["uploader_id"] == "1234567890123456789"
+
+
+async def test_reply_includes_the_users_own_count():
+    h, proc = await make(FakeProcessor(count=7, user_count=3))
+    m = FakeMessage()
+    await run(h, m)
+    assert "你今天已紀錄：3 首" in m.replies()[0][1]
+
+
+# ---------- !統計 指令 ----------
+
+
+async def test_stats_command_replies_with_the_summary_and_does_not_touch_the_queue():
+    h, proc = await make()
+    m = FakeMessage(attachments=[], content="!統計", author=SimpleNamespace(id=42, bot=False, display_name="小明"))
+    await run(h, m)
+    assert proc.calls == []
+    (reply,) = m.replies()
+    assert "優里（3）" in reply[1]
+    assert proc.stats_calls == [{"uploader_id": "42", "today": m.created_at.astimezone().replace(tzinfo=None).date()}]
+    assert m.adds() == []  # 指令不貼 ⏳ 或結果符號
+
+
+@pytest.mark.parametrize("text", ["!stats", " !STATS ", "!統計 "])
+async def test_stats_command_spellings(text):
+    h, proc = await make()
+    m = FakeMessage(attachments=[], content=text)
+    await run(h, m)
+    assert len(m.replies()) == 1
+
+
+async def test_stats_command_mentions_only_the_asker():
+    h, _ = await make()
+    m = FakeMessage(attachments=[], content="!統計")
+    await run(h, m)
+    assert m.replies()[0][2]["allowed_mentions"].everyone is False
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"channel_id": 222},
+        {"author": SimpleNamespace(id=5, bot=True, display_name="b")},
+        {"mtype": discord.MessageType.pins_add},
+    ],
+)
+async def test_stats_command_is_ignored_outside_the_channel_and_from_bots(kwargs):
+    h, proc = await make()
+    m = FakeMessage(attachments=[], content="!統計", **kwargs)
+    await run(h, m)
+    assert m.events == [] and proc.stats_calls == []
+
+
+async def test_a_message_with_an_image_is_an_image_even_if_it_says_stats():
+    h, proc = await make()
+    m = FakeMessage(content="!統計")
+    await run(h, m)
+    assert len(proc.calls) == 1 and proc.stats_calls == []
+
+
+async def test_other_text_messages_are_still_ignored():
+    h, proc = await make()
+    m = FakeMessage(attachments=[], content="!統計一下好嗎")
+    await run(h, m)
+    assert m.events == [] and proc.stats_calls == []
+
+
+async def test_stats_failure_gets_a_friendly_reply_and_does_not_crash(caplog):
+    proc = FakeProcessor()
+    proc.stats_error = RuntimeError("excel is gone")
+    h, _ = await make(proc)
+    m = FakeMessage(attachments=[], content="!統計")
+    with caplog.at_level(logging.ERROR, logger="music_bot.bot"):
+        await run(h, m)
+    assert "暫時" in m.replies()[0][1]
+    assert any("統計" in r.getMessage() for r in caplog.records)

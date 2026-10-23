@@ -19,10 +19,12 @@ import discord
 from .models import Outcome
 from .pipeline import MAX_IMAGE_BYTES, Processor, failure_outcome
 from .queue_worker import DEFAULT_MAX_PER_USER, DEFAULT_MAX_TOTAL, JobQueue
-from .replies import compose_rejection, compose_reply, result_symbol
+from .replies import compose_rejection, compose_reply, compose_stats, compose_stats_error, result_symbol
 
 logger = logging.getLogger(__name__)
 
+# 在指定頻道打這些字（整則訊息只有這個、沒有圖片）會回覆統計。不花 Claude 額度
+STATS_COMMANDS = ("!統計", "!stats")
 HOURGLASS = "⏳"
 RESULT_SYMBOLS = ("✅", "🚫", "❌")  # 固定順序，貼符號時依這個順序
 _IMAGE_EXTS = (".jpg", ".jpeg", ".png", ".gif", ".webp", ".heic", ".heif", ".bmp")
@@ -88,14 +90,21 @@ class BotHandler:
 
     # ---------- 收訊息 ----------
 
+    def _skip_reason(self, message: Any) -> str | None:
+        """這則訊息根本不在我們的處理範圍內（頻道、機器人、系統訊息）的原因；在範圍內就是 None。"""
+        if message.channel.id != self.channel_id:  # 只聽指定的那一個頻道
+            return f"不是指定的頻道（訊息來自頻道 {message.channel.id}，設定的 CHANNEL_ID 是 {self.channel_id}）"
+        if message.author.bot:  # 包含自己與其他機器人
+            return "機器人發的訊息"
+        if message.type not in _NORMAL_MESSAGE_TYPES:
+            return f"系統訊息（{message.type.name}）"
+        return None
+
     def _images_or_reason(self, message: Any) -> tuple[list[Any], str | None]:
         """回傳 (要處理的圖片, 略過的原因)。有圖片時原因是 None。"""
-        if message.channel.id != self.channel_id:  # 只聽指定的那一個頻道
-            return [], f"不是指定的頻道（訊息來自頻道 {message.channel.id}，設定的 CHANNEL_ID 是 {self.channel_id}）"
-        if message.author.bot:  # 包含自己與其他機器人
-            return [], "機器人發的訊息"
-        if message.type not in _NORMAL_MESSAGE_TYPES:
-            return [], f"系統訊息（{message.type.name}）"
+        reason = self._skip_reason(message)
+        if reason:
+            return [], reason
         images = [a for a in message.attachments if _is_image(a)]
         if not images:
             kinds = [getattr(a, "content_type", None) or getattr(a, "filename", "?") for a in message.attachments]
@@ -105,6 +114,9 @@ class BotHandler:
     async def handle_message(self, message: Any, enforce_limits: bool = True) -> None:
         images, reason = self._images_or_reason(message)
         if not images:
+            if self._skip_reason(message) is None and (message.content or "").strip().lower() in STATS_COMMANDS:
+                await self._reply_stats(message)
+                return
             # 只記原因，不記訊息內容。排查「為什麼沒反應」時很重要
             logger.info("略過訊息 %s：%s", message.id, reason)
             return
@@ -137,6 +149,16 @@ class BotHandler:
             await self._reply(message, compose_rejection())
         if state.remaining == 0:
             await self._finalize(message, state)
+
+    async def _reply_stats(self, message: Any) -> None:
+        logger.info("收到統計指令：訊息 %s", message.id)
+        try:
+            stats = await self.processor.stats(str(message.author.id), _local_naive(message.created_at).date())
+            text = compose_stats(stats)
+        except Exception:
+            logger.exception("讀取統計資料失敗")
+            text = compose_stats_error()
+        await self._reply(message, text)
 
     # ---------- 處理一張（由佇列的工作員呼叫） ----------
 
@@ -171,8 +193,9 @@ class BotHandler:
                 taken_at=_local_naive(message.created_at),
                 caption=message.content or None,
                 failure=failure,
+                uploader_id=str(message.author.id),
             )
-            text = compose_reply(result.outcome, result.daily_count)
+            text = compose_reply(result.outcome, result.daily_count, result.user_count)
             symbol = result_symbol(result.outcome)
         except Exception:
             # Processor 設計上不丟例外；真的丟了也不能讓這張沒有任何回應

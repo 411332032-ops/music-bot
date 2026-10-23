@@ -516,3 +516,63 @@ def test_snippet_link_fits_the_limit_and_is_never_cut():
     line = snippet_line(text)
     if line:
         assert SNIPPET_LINK_RE.match(line)
+
+
+# ---------- 「你今天已紀錄幾首」與統計 ----------
+
+
+def test_reply_shows_the_users_own_count_when_known():
+    text = compose_reply(music(), daily_count=7, user_count=3)
+    assert "今天已紀錄音樂數：7" in text
+    assert "你今天已紀錄：3 首" in text
+    assert text.rstrip().splitlines()[-1].startswith("🙋")  # 兩行數字都在最後
+
+
+@pytest.mark.parametrize("outcome", [non_music(), failure()])
+def test_non_music_and_failure_replies_also_show_the_users_count(outcome):
+    assert "你今天已紀錄：0 首" in compose_reply(outcome, daily_count=7, user_count=0)
+
+
+def test_reply_without_a_user_count_is_unchanged():
+    text = compose_reply(music(), daily_count=7)
+    assert "你今天已紀錄" not in text
+    assert text.rstrip().splitlines()[-1] == "📊 今天已紀錄音樂數：7"
+
+
+def test_both_count_lines_survive_even_when_the_body_is_too_long():
+    text = compose_reply(music(title="長" * 200, artist="歌" * 200, album_title="專" * 200), 7, 3)
+    assert len(text) <= 1800
+    assert "今天已紀錄音樂數：7" in text and "你今天已紀錄：3 首" in text
+
+
+def test_stats_reply_lists_numbers_and_rankings():
+    from music_bot.replies import compose_stats
+    from music_bot.storage import Stats
+
+    st = Stats(
+        total_music=12, today_music=3, uploaders=2, user_today=2, user_total=5,
+        top_artists=[("優里", 4), ("YOASOBI", 2)], top_genres=[("J-Pop", 6)],
+    )
+    text = compose_stats(st)
+    assert "12" in text and "2 位" in text
+    assert "今天：3 首" in text and "你：2 首" in text and "你累計：5 首" in text
+    assert "優里（4）" in text and "YOASOBI（2）" in text and "J-Pop（6）" in text
+
+
+def test_stats_reply_without_personal_numbers_or_data():
+    from music_bot.replies import compose_stats
+    from music_bot.storage import Stats
+
+    empty = Stats(0, 0, 0, None, None, [], [])
+    text = compose_stats(empty)
+    assert "還沒有" in text
+    assert "你：" not in text
+
+
+def test_stats_reply_escapes_markdown_in_names():
+    from music_bot.replies import compose_stats
+    from music_bot.storage import Stats
+
+    st = Stats(1, 1, 1, None, None, [("**粗體**", 1)], [("_斜體_", 1)])
+    text = compose_stats(st)
+    assert "**粗體**" not in text and "_斜體_" not in text

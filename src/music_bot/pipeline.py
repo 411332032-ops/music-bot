@@ -10,7 +10,7 @@ import asyncio
 import logging
 import time
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 from typing import Protocol
 
@@ -18,7 +18,7 @@ from . import storage
 from .analyzer import AnalysisFailure
 from .models import Outcome
 from .schema import FAILURE_TYPE, LYRICS_TYPE, NON_MUSIC_TYPE, NONE_WORD, UNKNOWN, Analysis, is_unknown_name
-from .storage import ExcelStore, Record
+from .storage import ExcelStore, Record, Stats
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +44,7 @@ class AnalyzerLike(Protocol):
 class ProcessResult:
     outcome: Outcome
     daily_count: int
+    user_count: int | None = None  # 這個人今天的音樂數；沒有上傳者 ID 就沒有
 
 
 def failure_outcome(reason: str, content: str | None = None) -> Outcome:
@@ -118,6 +119,7 @@ class Processor:
         taken_at: datetime,
         caption: str | None = None,
         failure: str | None = None,
+        uploader_id: str = "",
     ) -> ProcessResult:
         """taken_at 是上傳時間（補處理時也是原本的上傳時間）。
 
@@ -191,8 +193,13 @@ class Processor:
             confidence=outcome.confidence,
             album_title=outcome.album_title,
             release_type=outcome.release_type,
+            uploader_id=uploader_id,
         )
         # ExcelStore 內部可能因為檔案被鎖住而 sleep 重試，放到執行緒裡跑才不會卡住整個程式
-        daily_count = await asyncio.to_thread(self.store.append, record)
-        logger.info("Excel 已寫入：類型=%s 當日音樂數=%d", outcome.image_type, daily_count)
-        return ProcessResult(outcome, daily_count)
+        added = await asyncio.to_thread(self.store.append_record, record)
+        logger.info("Excel 已寫入：類型=%s 當日音樂數=%d", outcome.image_type, added.daily_count)
+        return ProcessResult(outcome, added.daily_count, added.user_count)
+
+    async def stats(self, uploader_id: str, today: date) -> Stats:
+        """給「!統計」用：讀 Excel 放到執行緒裡，才不會卡住整個程式。"""
+        return await asyncio.to_thread(self.store.stats, today, uploader_id)

@@ -25,6 +25,11 @@ uv run python main.py
 - 第一次啟動**不會**補處理頻道裡的舊圖片，從現在開始處理。
 - 之後每次啟動，會補處理「關機期間漏掉的圖片」（補到上次正常處理的最後一張為止）。補處理不受下面的排隊上限限制，積壓的圖會全部排進去慢慢處理。
 
+## 頻道裡怎麼用
+
+- 傳專輯封面或歌詞照片：機器人辨識後回覆，並顯示「今天已紀錄音樂數」與「你今天已紀錄 N 首」。
+- 打 `!統計`（或 `!stats`）：回覆目前的總數、今天的數字、你的數字，以及最常出現的歌手與曲風。不花 Claude 額度。
+
 ## 資料放哪裡
 
 都在 `DATA_DIR` 底下（預設 `./data`，已被 `.gitignore` 擋掉，不會被 commit）：
@@ -52,10 +57,10 @@ uv run pytest
 
 | 防護 | 擋什麼 | 檔案 | 開關 | 大約行號 |
 | --- | --- | --- | --- | --- |
-| 防護 1：工作目錄限制 | 讓 `claude -p` 讀到 `DATA_DIR` 裡別人的照片和紀錄 | `src/music_bot/analyzer.py` | `ENABLE_GUARD_1` | 92–127 |
-| 防護 2：Prompt Injection 隔離 | 上傳者的字被當成給 `claude -p` 的指令 | `src/music_bot/analyzer.py`（加 `prompts/guard2_data_only.md`） | `ENABLE_GUARD_2` | 133–153 |
-| 防護 3：檔名安全性清洗 | 專輯名稱含 `..`、`/`、`\`、`:` 讓檔案跑到別的地方 | `src/music_bot/storage.py` | `ENABLE_GUARD_3` | 39–80 |
-| 防護 4：Excel 公式注入防護 | 以 `=` `+` `-` `@` 開頭的文字在 Excel 裡被當成公式 | `src/music_bot/storage.py` | `ENABLE_GUARD_4` | 166–180 |
+| 防護 1：工作目錄限制 | 讓 `claude -p` 讀到 `DATA_DIR` 裡別人的照片和紀錄 | `src/music_bot/analyzer.py` | `ENABLE_GUARD_1` | 92–131 |
+| 防護 2：Prompt Injection 隔離 | 上傳者的字被當成給 `claude -p` 的指令 | `src/music_bot/analyzer.py`（加 `prompts/guard2_data_only.md`） | `ENABLE_GUARD_2` | 137–157 |
+| 防護 3：檔名安全性清洗 | 專輯名稱含 `..`、`/`、`\`、`:` 讓檔案跑到別的地方 | `src/music_bot/storage.py` | `ENABLE_GUARD_3` | 40–81 |
+| 防護 4：Excel 公式注入防護 | 以 `=` `+` `-` `@` 開頭的文字在 Excel 裡被當成公式 | `src/music_bot/storage.py` | `ENABLE_GUARD_4` | 170–184 |
 
 行號會隨編輯而移動，要找確切位置請執行：
 

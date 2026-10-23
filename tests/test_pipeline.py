@@ -513,3 +513,27 @@ async def test_lyric_snippet_is_not_written_to_the_log(tmp_path, caplog):
     with caplog.at_level(logging.INFO, logger="music_bot.pipeline"):
         await proc.process(JPEG, "小明", WHEN)
     assert not any("只拿來搜尋" in m for m in caplog.messages)
+
+
+# ---------- 上傳者 ID 與個人當日數 ----------
+
+
+async def test_uploader_id_is_recorded_and_the_user_count_is_returned(tmp_path):
+    proc, _ = make(tmp_path)
+    r1 = await proc.process(JPEG, "小明", WHEN, uploader_id="111")
+    r2 = await proc.process(JPEG, "小華", WHEN, uploader_id="222")
+    r3 = await proc.process(JPEG, "小明", WHEN, uploader_id="111")
+    assert [r.user_count for r in (r1, r2, r3)] == [1, 1, 2]
+    assert [row(tmp_path, n)[12] for n in (2, 3, 4)] == ["111", "222", "111"]
+
+
+async def test_without_an_uploader_id_there_is_no_user_count(tmp_path):
+    proc, _ = make(tmp_path)
+    assert (await proc.process(JPEG, "小明", WHEN)).user_count is None
+
+
+async def test_processor_stats_reads_the_excel(tmp_path):
+    proc, _ = make(tmp_path)
+    await proc.process(JPEG, "小明", WHEN, uploader_id="111")
+    st = await proc.stats("111", WHEN.date())
+    assert st.total_music == 1 and st.user_today == 1 and st.top_artists == [("優里", 1)]

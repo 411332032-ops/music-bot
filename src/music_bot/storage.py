@@ -13,11 +13,12 @@ import logging
 import os
 import time
 import unicodedata
-from collections import defaultdict
+from collections import Counter, defaultdict
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from datetime import date, datetime
 from pathlib import Path
+from typing import NamedTuple
 
 from openpyxl import Workbook, load_workbook
 from openpyxl.cell.cell import ILLEGAL_CHARACTERS_RE
@@ -138,9 +139,11 @@ COLUMNS = [
     "當日已紀錄音樂數",
     "照片存放位置",
     "信心程度",
+    "上傳者ID",  # Discord 的使用者 ID（文字）：顯示名稱可以改，ID 不會變，統計「你」用它
 ]
 _PHOTO_COLUMN = 11  # 「照片存放位置」是第幾欄（從 1 起算）
-_COLUMN_WIDTHS = [20, 14, 14, 28, 28, 10, 20, 20, 40, 12, 45, 10]
+_UPLOADER_ID_COLUMN = 13
+_COLUMN_WIDTHS = [20, 14, 14, 28, 28, 10, 20, 20, 40, 12, 45, 10, 22]
 
 # 舊版（歌名與專輯名稱合成「專輯/歌曲名稱」一欄）的 10 欄格式。打開舊檔案時會自動轉成上面的新格式。
 LEGACY_COLUMNS_V1 = [
@@ -159,6 +162,7 @@ _LEGACY_PHOTO_COLUMN = 9
 _LEGACY_INSERT_AT = 5  # 在舊格式的第 5 欄（歌手）前面插入「專輯名稱」「發行類型」兩欄
 SHEET_NAME = "紀錄"
 MAX_CELL_CHARS = 32000  # Excel 單一儲存格上限是 32767
+_NOT_A_NAME = ("無", UNKNOWN, "無法辨識")  # 統計歌手、曲風排行時要跳過的「沒有名稱」
 PENDING_FILENAME = "pending_records.jsonl"
 REJECTED_PENDING_FILENAME = "pending_records.rejected.jsonl"  # 暫存檔裡讀不懂的行另存在這裡
 
@@ -201,6 +205,31 @@ class Record:
     # 後來新增的欄位，放最後面並給預設值：舊版留下的暫存檔沒有這兩個欄位，也要能讀進來
     album_title: str = UNKNOWN
     release_type: str = UNKNOWN
+    uploader_id: str = ""  # Discord 使用者 ID；舊的暫存檔與舊的紀錄沒有，就是空字串
+
+
+@dataclass(frozen=True)
+class AppendResult:
+    daily_count: int  # 這一天（上傳那天）全頻道的音樂數
+    user_count: int | None  # 這一天這個人的音樂數；沒有上傳者 ID 就是 None
+
+
+@dataclass(frozen=True)
+class Stats:
+    total_music: int
+    today_music: int
+    uploaders: int  # 有幾個不同的上傳者（只算音樂相關的紀錄）
+    user_today: int | None  # 沒給上傳者 ID 就是 None
+    user_total: int | None
+    top_artists: list[tuple[str, int]]
+    top_genres: list[tuple[str, int]]
+
+
+class _Added(NamedTuple):
+    daily: int
+    user: int | None
+    day_counts: dict[date, int]
+    user_counts: dict[tuple[date, str], int]
 
 
 class ExcelStore:
@@ -224,6 +253,7 @@ class ExcelStore:
         self.retry_delay = retry_delay
         self.sleep = sleep
         self._known_counts: dict[date, int] = {}  # 最近一次成功寫入後，每一天的音樂數
+        self._known_user_counts: dict[tuple[date, str], int] = {}  # 同上，每個人每一天
         self._unparsable_pending: list[str] = []  # 這一輪從暫存檔讀不懂的行
         self._loaded_pending: list[str] = []  # 這一輪讀進來、準備補寫的行
         self._already_written: set[str] = set()  # 已經補寫進 Excel、但暫存檔還刪不掉的行
@@ -232,12 +262,16 @@ class ExcelStore:
 
     def append(self, record: Record) -> int:
         """追加一筆，回傳這一筆的「當日已紀錄音樂數」。絕不丟出例外。"""
+        return self.append_record(record).daily_count
+
+    def append_record(self, record: Record) -> AppendResult:
+        """追加一筆，回傳當日音樂數，以及這個人當天的音樂數。絕不丟出例外。"""
         batch = self._load_pending() + [record]
-        count: int | None = None
+        added: _Added | None = None
         for attempt in range(1, self.retries + 1):
             try:
                 wb, ws = self._open()
-                count, counts_after = self._add_rows(ws, batch)
+                added = self._add_rows(ws, batch)
                 self._save(wb)
             except PermissionError as e:
                 logger.warning(
@@ -253,18 +287,63 @@ class ExcelStore:
                 break
             else:
                 # 存檔已經成功；清暫存檔失敗不能當成「Excel 寫入失敗」重來，否則同一批紀錄會被寫兩次
-                self._known_counts = counts_after
+                self._known_counts = added.day_counts
+                self._known_user_counts = added.user_counts
                 self._clear_pending()
-                return count
+                return AppendResult(added.daily, added.user)
 
         self._append_pending(record)
-        if count is None:
-            # 連 Excel 都讀不到，沒辦法重新掃描：用上次成功寫入後記下的當日數，再加上還沒寫進去的
-            day = record.taken_at.date()
-            count = self._known_counts.get(day, 0) + sum(
-                1 for r in batch if r.image_type in MUSIC_TYPES and r.taken_at.date() == day
-            )
-        return count
+        if added is not None:
+            return AppendResult(added.daily, added.user)  # 掃描過了，只是存不進去：數字是準的
+        # 連 Excel 都讀不到，沒辦法重新掃描：用上次成功寫入後記下的數字，再加上還沒寫進去的
+        day, uid = record.taken_at.date(), record.uploader_id
+        unwritten = [r for r in batch if r.image_type in MUSIC_TYPES and r.taken_at.date() == day]
+        daily = self._known_counts.get(day, 0) + len(unwritten)
+        user = None
+        if uid:
+            user = self._known_user_counts.get((day, uid), 0) + sum(1 for r in unwritten if r.uploader_id == uid)
+        return AppendResult(daily, user)
+
+    def stats(self, today: date, uploader_id: str = "", top_n: int = 5) -> Stats:
+        """讀 Excel 做統計（只算音樂相關的紀錄）。檔案還不存在就全部是 0；讀不了會丟例外。"""
+        total = today_count = user_today = user_total = 0
+        uploaders: set[str] = set()
+        artists: Counter[str] = Counter()
+        genres: Counter[str] = Counter()
+        if self.path.exists():
+            wb = load_workbook(self.path, read_only=True)
+            try:
+                for row in wb.worksheets[0].iter_rows(min_row=2, values_only=True):
+                    if len(row) < 3 or row[2] not in MUSIC_TYPES:
+                        continue
+                    day = self._row_date(row[0])
+                    uid = self._cell_uploader_id(row)
+                    total += 1
+                    uploaders.add(uid or str(row[1]))
+                    if day == today:
+                        today_count += 1
+                    if uploader_id and uid == uploader_id:
+                        user_total += 1
+                        user_today += day == today
+                    artist = str(row[6]).strip() if len(row) > 6 and row[6] is not None else ""
+                    if artist and artist not in _NOT_A_NAME:
+                        artists[artist] += 1
+                    genre_cell = str(row[7]) if len(row) > 7 and row[7] is not None else ""
+                    for label in genre_cell.split(" / "):
+                        label = label.strip()
+                        if label and label not in _NOT_A_NAME:
+                            genres[label] += 1
+            finally:
+                wb.close()
+        return Stats(
+            total_music=total,
+            today_music=today_count,
+            uploaders=len(uploaders),
+            user_today=user_today if uploader_id else None,
+            user_total=user_total if uploader_id else None,
+            top_artists=artists.most_common(top_n),
+            top_genres=genres.most_common(top_n),
+        )
 
     # ---------- 內部：Excel ----------
 
@@ -277,8 +356,11 @@ class ExcelStore:
         if self.path.exists():
             wb = load_workbook(self.path)
             ws = wb.worksheets[0]
-            if [c.value for c in ws[1]] == LEGACY_COLUMNS_V1:
+            header = [c.value for c in ws[1]]
+            if header == LEGACY_COLUMNS_V1:
                 self._migrate_legacy(ws)
+            elif header == COLUMNS[:-1]:
+                self._add_uploader_id_column(ws)
             return wb, ws
         wb = Workbook()
         ws = wb.active
@@ -289,6 +371,14 @@ class ExcelStore:
         self._apply_column_widths(ws)
         ws.freeze_panes = "A2"
         return wb, ws
+
+    def _add_uploader_id_column(self, ws) -> None:
+        """12 欄的檔案：在最後面補上「上傳者ID」欄的標題，舊紀錄這一欄留空。"""
+        logger.info("偵測到沒有「上傳者ID」欄的 Excel，補上這一欄（舊紀錄留空）")
+        header = ws.cell(row=1, column=_UPLOADER_ID_COLUMN)
+        header.value = COLUMNS[-1]
+        header.font = Font(bold=True)
+        self._apply_column_widths(ws)
 
     def _migrate_legacy(self, ws) -> None:
         """把舊的 10 欄格式轉成新的 12 欄：在歌手前面插入「專輯名稱」「發行類型」兩欄。
@@ -333,20 +423,33 @@ class ExcelStore:
                 return None
         return None
 
-    def _add_rows(self, ws, batch: list[Record]) -> tuple[int, dict[date, int]]:
-        """把 batch 依序加到最後，回傳 (最後一筆的當日音樂數, 加完之後每一天的音樂數)。"""
+    @staticmethod
+    def _cell_uploader_id(row) -> str:
+        value = row[_UPLOADER_ID_COLUMN - 1] if len(row) >= _UPLOADER_ID_COLUMN else None
+        return "" if value is None else str(value).strip()
+
+    def _add_rows(self, ws, batch: list[Record]) -> _Added:
+        """把 batch 依序加到最後，回傳最後一筆的當日數與個人當日數，以及加完之後每一天、每個人的音樂數。"""
         counts: dict[date, int] = defaultdict(int)
+        user_counts: dict[tuple[date, str], int] = defaultdict(int)
         for row in ws.iter_rows(min_row=2, values_only=True):
             d = self._row_date(row[0] if row else None)
             if d is not None and len(row) > 2 and row[2] in MUSIC_TYPES:
                 counts[d] += 1
+                uid = self._cell_uploader_id(row)
+                if uid:
+                    user_counts[(d, uid)] += 1
 
         last = 0
+        last_user: int | None = None
         for r in batch:
             day = r.taken_at.date()
             if r.image_type in MUSIC_TYPES:
                 counts[day] += 1
+                if r.uploader_id:
+                    user_counts[(day, r.uploader_id)] += 1
             last = counts[day]
+            last_user = user_counts[(day, r.uploader_id)] if r.uploader_id else None
             ws.append(
                 [
                     r.taken_at,
@@ -361,6 +464,8 @@ class ExcelStore:
                     last,
                     r.photo_rel if r.photo_rel else "無",
                     clean_cell_text(r.confidence),
+                    # 一定要是文字：19 位數字放不進 Excel 的數字格式（只有 15 位精度）
+                    clean_cell_text(r.uploader_id) if r.uploader_id else None,
                 ]
             )
             row_no = ws.max_row
@@ -368,10 +473,10 @@ class ExcelStore:
             if r.photo_rel:
                 link = ws.cell(row=row_no, column=_PHOTO_COLUMN)
                 # 相對路徑：整個資料夾搬家連結也不會斷。# 和 % 在連結裡有特殊意思
-                #（片段、跳脫字元），歌名含這些字時要跳脫，不然點下去找不到檔案；儲存格上看到的文字不變
+                # （片段、跳脫字元），歌名含這些字時要跳脫，不然點下去找不到檔案；儲存格上看到的文字不變
                 link.hyperlink = r.photo_rel.replace("%", "%25").replace("#", "%23")
                 link.style = "Hyperlink"
-        return last, dict(counts)
+        return _Added(last, last_user, dict(counts), dict(user_counts))
 
     def _save(self, wb) -> None:
         tmp = self.path.with_name(self.path.name + ".tmp")

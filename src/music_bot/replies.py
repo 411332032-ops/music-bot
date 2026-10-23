@@ -11,6 +11,7 @@ from discord.utils import escape_markdown
 
 from .models import Outcome
 from .schema import is_unknown_name
+from .storage import Stats
 
 MAX_REPLY_CHARS = 1800  # Discord 上限是 2000，留一點空間
 
@@ -44,13 +45,17 @@ def _esc(text: str) -> str:
     return escape_markdown(text)
 
 
-def _count_line(daily_count: int) -> str:
-    return f"📊 今天已紀錄音樂數：{daily_count}"
+def _count_line(daily_count: int, user_count: int | None = None) -> str:
+    """最後的數字行。有上傳者 ID 才會有「你今天已紀錄」那一行。"""
+    line = f"📊 今天已紀錄音樂數：{daily_count}"
+    if user_count is not None:
+        line += f"\n🙋 你今天已紀錄：{user_count} 首"
+    return line
 
 
-def _assemble(body_lines: list[str], daily_count: int) -> str:
-    """內文太長就截短內文；最後一行的當日數永遠保留。"""
-    tail = _count_line(daily_count)
+def _assemble(body_lines: list[str], daily_count: int, user_count: int | None = None) -> str:
+    """內文太長就截短內文；最後的數字行永遠保留。"""
+    tail = _count_line(daily_count, user_count)
     head = "\n".join(body_lines)
     room = MAX_REPLY_CHARS - len(tail) - 1
     if len(head) > room:
@@ -131,7 +136,7 @@ def _apps_link_line(outcome: Outcome, room: int) -> str | None:
     return None
 
 
-def compose_reply(outcome: Outcome, daily_count: int) -> str:
+def compose_reply(outcome: Outcome, daily_count: int, user_count: int | None = None) -> str:
     if outcome.is_failure:
         reason = outcome.failure_reason or "未知"
         return _assemble(
@@ -140,12 +145,14 @@ def compose_reply(outcome: Outcome, daily_count: int) -> str:
                 f"我看到的內容：{_esc(outcome.title)}",
             ],
             daily_count,
+            user_count,
         )
 
     if outcome.is_non_music:
         return _assemble(
             [f"🚫 你傳的不是音樂封面或歌詞，是「{_esc(outcome.title)}」。"],
             daily_count,
+            user_count,
         )
 
     genre = " / ".join(outcome.genre) if outcome.genre else "無"
@@ -161,7 +168,7 @@ def compose_reply(outcome: Outcome, daily_count: int) -> str:
     ]
 
     # 連結「整條放得下才放」：空間不夠時寧可少放幾條，也不要把網址截到一半（截一半的網址點了也沒用）
-    room = MAX_REPLY_CHARS - len(_count_line(daily_count)) - 1 - len("\n".join(body))
+    room = MAX_REPLY_CHARS - len(_count_line(daily_count, user_count)) - 1 - len("\n".join(body))
     # 兩種「找歌詞」連結互斥：歌名已知就用歌名搜；歌名不明的歌詞截圖就用那一小句歌詞搜
     google = _lyrics_link_line(outcome) or _snippet_link_line(outcome)
     if google and len(google) + 1 <= room:
@@ -172,7 +179,34 @@ def compose_reply(outcome: Outcome, daily_count: int) -> str:
         body.append(apps)
 
     # 歌詞轉錄功能已停用：回覆裡不顯示歌詞（outcome.lyrics 即使有內容也不用）
-    return _assemble(body, daily_count)
+    return _assemble(body, daily_count, user_count)
+
+
+def _ranking(items: list[tuple[str, int]]) -> str:
+    return "、".join(f"{_esc(name)}（{n}）" for name, n in items)
+
+
+def compose_stats(stats: Stats) -> str:
+    """「!統計」的回覆。名稱來自模型看別人的圖，所以一律跳脫 Markdown。"""
+    if stats.total_music == 0:
+        lines = ["📈 還沒有任何音樂紀錄，傳一張專輯封面或歌詞照片來試試吧。"]
+    else:
+        lines = [f"📈 目前共 {stats.total_music} 首音樂紀錄，來自 {stats.uploaders} 位上傳者"]
+        today = f"今天：{stats.today_music} 首"
+        if stats.user_today is not None:
+            today += f"（你：{stats.user_today} 首）"
+        lines.append(today)
+        if stats.user_total is not None:
+            lines.append(f"你累計：{stats.user_total} 首")
+        if stats.top_artists:
+            lines.append(f"🎤 最常出現的歌手：{_ranking(stats.top_artists)}")
+        if stats.top_genres:
+            lines.append(f"🎼 最常出現的曲風：{_ranking(stats.top_genres)}")
+    return "\n".join(lines)[:MAX_REPLY_CHARS]
+
+
+def compose_stats_error() -> str:
+    return "❌ 暫時讀不到統計資料（Excel 可能正被打開或正在寫入），請稍後再試。"
 
 
 def compose_rejection() -> str:
