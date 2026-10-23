@@ -1,0 +1,32 @@
+[project]
+name = "music-bot"
+version = "0.1.0"
+description = "Discord bot that recognizes album covers and lyrics from uploaded photos"
+requires-python = ">=3.12"
+dependencies = [
+    "discord-py>=2.7.1",
+    "openpyxl>=3.1.5",
+    "pydantic>=2.14.1",
+    "python-dotenv>=1.2.4",
+]
+
+[project.scripts]
+music-bot = "music_bot.__main__:main"
+
+[build-system]
+requires = ["uv_build>=0.12.13,<0.13.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+    "pytest-asyncio>=1.4.0",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+filterwarnings = [
+    # discord.py 在 Python 3.12 匯入時會碰到標準函式庫的 audioop 棄用警告；我們沒用語音功能
+    "ignore:'audioop' is deprecated:DeprecationWarning",
+]
