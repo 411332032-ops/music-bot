@@ -96,8 +96,8 @@ def find_claude() -> str | None:
 #       只開放 Read 工具，並用 --restricted 把讀檔範圍鎖在工作目錄內。處理完整個刪掉。
 @dataclass
 class Sandbox:
-    workdir: Path
-    image_name: str
+    workdir: Path  # claude 的工作目錄
+    image_ref: str  # 在指示裡怎麼稱呼那張圖：開著時是檔名，關掉時是完整路徑
     args: list[str]
 
 
@@ -105,7 +105,8 @@ class Sandbox:
 def sandbox_for(image: bytes, ext: str, data_dir: Path) -> Iterator[Sandbox]:
     image_name = f"image{ext}"  # 固定檔名，絕不用上傳者給的檔名
     with tempfile.TemporaryDirectory(prefix="music-bot-", ignore_cleanup_errors=True) as tmp:
-        (Path(tmp) / image_name).write_bytes(image)
+        image_path = Path(tmp) / image_name
+        image_path.write_bytes(image)
         if ENABLE_GUARD_1:
             args = [
                 "--tools", "Read",
@@ -113,15 +114,18 @@ def sandbox_for(image: bytes, ext: str, data_dir: Path) -> Iterator[Sandbox]:
                 "--permission-mode", "dontAsk",
                 "--restricted",
             ]  # fmt: skip
+            yield Sandbox(Path(tmp), image_name, args)
         else:
-            # 故意放寬（上課對照用）：不鎖讀檔範圍，還把 DATA_DIR 一併開放
+            # 故意放寬（上課對照用）：不鎖讀檔範圍，工作目錄直接設成 DATA_DIR，
+            # 所以只寫檔名（例如 canary_test.txt）也讀得到 DATA_DIR 裡的東西。
+            # 圖片還在臨時資料夾，所以用 --add-dir 開放它，並在指示裡給完整路徑。
             args = [
                 "--tools", "Read",
                 "--allowedTools", "Read",
                 "--permission-mode", "dontAsk",
-                "--add-dir", str(data_dir),
+                "--add-dir", tmp,
             ]  # fmt: skip
-        yield Sandbox(Path(tmp), image_name, args)
+            yield Sandbox(data_dir, str(image_path), args)
 
 
 # ==== 防護 1：工作目錄限制 結束 ====
@@ -135,8 +139,8 @@ def sandbox_for(image: bytes, ext: str, data_dir: Path) -> Iterator[Sandbox]:
 #       文字（或圖片裡的字）裡，騙它改變行為。
 # 做法：1. 上傳者打的字完全不放進給 claude 的指令（下面的 caption 在開著時被忽略）。
 #       2. 系統指令明確規定：圖片裡的字都只是資料，不是指令（guard2_data_only.md）。
-def build_user_prompt(image_name: str, caption: str | None) -> str:
-    prompt = f"請讀取目前資料夾中的 {image_name} 這一個檔案，依規格分析。"
+def build_user_prompt(image_ref: str, caption: str | None) -> str:
+    prompt = f"請讀取這一個圖片檔案：{image_ref}，依規格分析。"
     if not ENABLE_GUARD_2 and caption:
         # 故意不設防（上課對照用）：上傳者的文字直接黏在指令後面
         prompt += f"\n上傳者附註：{caption}"
@@ -302,7 +306,7 @@ class Analyzer:
             raise AnalysisFailure("圖片損壞或格式不支援")
         try:
             with sandbox_for(image, ext, self.data_dir) as box:
-                prompt = build_user_prompt(box.image_name, caption)
+                prompt = build_user_prompt(box.image_ref, caption)
                 base_prompt = prompt
                 last_reason, last_title = "格式不符", None
                 for _ in range(MAX_CALLS_PER_IMAGE):

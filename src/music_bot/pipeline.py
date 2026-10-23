@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -24,6 +25,15 @@ logger = logging.getLogger(__name__)
 MAX_IMAGE_BYTES = 10 * 1024 * 1024
 UNKNOWN_CONTENT = "處理失敗，無法判斷圖片內容"
 FAILED_NAME = "處理失敗"  # 失敗又沒有內容可當檔名簡稱時用
+
+
+LOG_FIELD_CHARS = 60  # log 裡單一欄位最多顯示幾個字
+LOG_TEXT_CHARS = 120  # 內文（非音樂的說明）可以多一點
+
+
+def _brief(text: str, limit: int = LOG_FIELD_CHARS) -> str:
+    """給 log 用的短文字。配合 %r 輸出，換行會變成跳脫字元，一筆 log 不會被斷成好幾行。"""
+    return text if len(text) <= limit else text[:limit] + "…"
 
 
 class AnalyzerLike(Protocol):
@@ -114,25 +124,47 @@ class Processor:
         image 為 None 代表沒有拿到圖：failure 若有給（例如附件太大所以沒下載），
         就用它當失敗原因；沒給就當作下載失敗。
         """
+        # log 記步驟與分析結果：不記上傳者暱稱、訊息文字、只拿來搜尋的那一句歌詞（architecture.md 第 12.5 節）
         ext: str | None = None
         short_name = FAILED_NAME
         keep_photo = image is not None and len(image) <= MAX_IMAGE_BYTES
 
         if image is None:
             outcome = failure_outcome(failure or "下載失敗")
+            logger.warning("沒有取得圖片（原因：%s），只建立失敗紀錄", outcome.failure_reason)
         elif not keep_photo:
             outcome = failure_outcome("圖片過大")
+            logger.warning("圖片過大（%d bytes），不分析", len(image))
         else:
+            logger.info("開始處理：圖片 %d bytes", len(image))
             ext = storage.detect_image_ext(image)
             if ext is None:
                 outcome = failure_outcome("圖片損壞或格式不支援")
+                logger.warning("圖片格式不支援（魔術數字不是 jpg/png/gif/webp）")
             else:
+                started = time.monotonic()
                 try:
                     outcome = outcome_from_analysis(await self.analyzer.analyze(image, ext, caption))
                     short_name = file_name_hint(outcome)
+                    logger.info(
+                        "分析完成：類型=%s 信心=%s 耗時 %.1f 秒",
+                        outcome.image_type,
+                        outcome.confidence,
+                        time.monotonic() - started,
+                    )
+                    logger.info(
+                        "分析結果：歌曲/名稱=%r 專輯=%r 發行類型=%s 歌手=%r 曲風=%s 內文=%r",
+                        _brief(outcome.title),
+                        _brief(outcome.album_title),
+                        outcome.release_type,
+                        _brief(outcome.artist),
+                        " / ".join(outcome.genre) or NONE_WORD,
+                        _brief(outcome.lyrics, LOG_TEXT_CHARS),
+                    )
                 except AnalysisFailure as e:
                     outcome = failure_outcome(e.reason, e.salvaged_title)
                     short_name = e.salvaged_title or FAILED_NAME
+                    logger.warning("分析失敗：原因=%s 耗時 %.1f 秒", e.reason, time.monotonic() - started)
 
         photo_rel: str | None = None
         if keep_photo:
@@ -142,6 +174,7 @@ class Processor:
                     storage.save_photo, self.photos_dir, image, taken_at, short_name, ext or ".bin"
                 )
                 photo_rel = path.relative_to(self.data_dir).as_posix()
+                logger.info("照片已存檔（%d bytes）", len(image))
             except Exception:
                 logger.exception("存照片失敗")
                 outcome = failure_outcome("內部錯誤")
@@ -161,4 +194,5 @@ class Processor:
         )
         # ExcelStore 內部可能因為檔案被鎖住而 sleep 重試，放到執行緒裡跑才不會卡住整個程式
         daily_count = await asyncio.to_thread(self.store.append, record)
+        logger.info("Excel 已寫入：類型=%s 當日音樂數=%d", outcome.image_type, daily_count)
         return ProcessResult(outcome, daily_count)

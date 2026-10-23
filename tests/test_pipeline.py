@@ -444,3 +444,72 @@ async def test_failure_outcome_has_no_snippet(tmp_path):
     proc, _ = make(tmp_path, AnalysisFailure("逾時"))
     r = await proc.process(JPEG, "小明", WHEN)
     assert r.outcome.lyric_snippet == ""
+
+
+# ---------- log：處理過程每一步都要看得到（記分析結果，但不記上傳者暱稱） ----------
+
+
+async def test_processing_steps_are_logged_without_the_uploader_name(tmp_path, caplog):
+    import logging
+
+    proc, _ = make(tmp_path)
+    with caplog.at_level(logging.INFO, logger="music_bot.pipeline"):
+        await proc.process(JPEG, "小明", WHEN)
+    text = "\n".join(caplog.messages)
+    assert "開始處理" in text and f"{len(JPEG)} bytes" in text
+    assert "分析完成" in text and "專輯封面" in text and "高" in text
+    assert "照片已存檔" in text
+    assert "Excel 已寫入" in text and "當日音樂數=1" in text
+    assert "小明" not in text  # 上傳者暱稱不進 log
+
+
+async def test_analysis_failure_is_logged_with_its_reason(tmp_path, caplog):
+    import logging
+
+    proc, _ = make(tmp_path, AnalysisFailure("逾時"))
+    with caplog.at_level(logging.INFO, logger="music_bot.pipeline"):
+        await proc.process(JPEG, "小明", WHEN)
+    assert any("分析失敗" in m and "逾時" in m for m in caplog.messages)
+    assert any("Excel 已寫入" in m and "處理失敗" in m for m in caplog.messages)
+
+
+async def test_image_that_was_never_downloaded_is_logged(tmp_path, caplog):
+    import logging
+
+    proc, _ = make(tmp_path)
+    with caplog.at_level(logging.INFO, logger="music_bot.pipeline"):
+        await proc.process(None, "小明", WHEN, failure="下載失敗")
+    assert any("沒有取得圖片" in m and "下載失敗" in m for m in caplog.messages)
+
+
+async def test_analysis_result_is_logged(tmp_path, caplog):
+    import logging
+
+    proc, _ = make(tmp_path)
+    with caplog.at_level(logging.INFO, logger="music_bot.pipeline"):
+        await proc.process(JPEG, "小明", WHEN)
+    line = next(m for m in caplog.messages if m.startswith("分析結果"))
+    for expected in ("ドライフラワー", "某專輯", "EP", "優里", "J-Pop / 抒情"):
+        assert expected in line
+
+
+async def test_non_music_description_is_in_the_result_log_but_shortened_and_on_one_line(tmp_path, caplog):
+    import logging
+
+    long_text = "第一行" + chr(10) + "第二行" + "很長" * 200
+    proc, _ = make(tmp_path, analysis(is_music_related=False, type="非音樂相關", title="一碗拉麵", lyrics_text=long_text))
+    with caplog.at_level(logging.INFO, logger="music_bot.pipeline"):
+        await proc.process(JPEG, "小明", WHEN)
+    line = next(m for m in caplog.messages if m.startswith("分析結果"))
+    assert "一碗拉麵" in line and "第一行" in line
+    assert chr(10) not in line  # 換行要變成跳脫字元，不能讓一筆 log 斷成好幾行或偽造另一行
+    assert len(line) < 400
+
+
+async def test_lyric_snippet_is_not_written_to_the_log(tmp_path, caplog):
+    import logging
+
+    proc, _ = make(tmp_path, analysis(type="歌詞手稿", title="不明", lyric_snippet="這是一句只拿來搜尋的歌詞"))
+    with caplog.at_level(logging.INFO, logger="music_bot.pipeline"):
+        await proc.process(JPEG, "小明", WHEN)
+    assert not any("只拿來搜尋" in m for m in caplog.messages)

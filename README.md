@@ -36,7 +36,7 @@ uv run python main.py
 | `state.json` | 第一次啟動的時間（開機補處理用） |
 | `pending_records.jsonl` | 只有 Excel 被鎖住寫不進去時才會出現的暫存，下次可寫入時自動補上 |
 | `pending_records.rejected.jsonl` | 只有暫存檔裡出現讀不懂的行時才會出現，把那些行另存起來給人看 |
-| `logs/agent.log` | 執行紀錄（只記狀態，不記 token 與完整歌詞） |
+| `logs/agent.log` | 執行紀錄（每張圖的處理步驟與分析結果；不記 token、上傳者暱稱與訊息文字） |
 
 ## 測試
 

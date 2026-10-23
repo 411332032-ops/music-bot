@@ -163,11 +163,50 @@ async def test_guard1_restricts_tools_and_file_scope(tmp_path):
 
 async def test_guard1_off_widens_access_to_data_dir(monkeypatch, tmp_path):
     monkeypatch.setattr(analyzer, "ENABLE_GUARD_1", False)
+    (tmp_path / "data").mkdir()
     a, runner = make(tmp_path, RunResult(0, ok_stdout(), ""))
     await a.analyze(IMG, ".jpg")
     cmd = runner.calls[0]["cmd"]
     assert "--restricted" not in cmd
-    assert arg_after(cmd, "--add-dir") == str(tmp_path / "data")
+    assert arg_after(cmd, "--tools") == "Read"  # 其他工具照樣沒有，只放寬讀檔範圍
+
+
+async def test_guard1_off_runs_claude_inside_data_dir_so_a_bare_filename_resolves(monkeypatch, tmp_path):
+    """關掉防護 1 時工作目錄就是 DATA_DIR：備註只寫 canary_test.txt 也讀得到。"""
+    monkeypatch.setattr(analyzer, "ENABLE_GUARD_1", False)
+    data = tmp_path / "data"
+    data.mkdir()
+    (data / "canary_test.txt").write_text("CANARY-123", encoding="utf-8")
+    a, runner = make(tmp_path, RunResult(0, ok_stdout(), ""))
+    await a.analyze(IMG, ".jpg")
+    call = runner.calls[0]
+    assert call["cwd"] == data
+    assert "canary_test.txt" in call["files"]
+
+
+async def test_guard1_off_still_lets_claude_read_the_image(monkeypatch, tmp_path):
+    """工作目錄換成 DATA_DIR 之後，圖片還在臨時資料夾：指示裡要給完整路徑，並用 --add-dir 開放那個資料夾。"""
+    monkeypatch.setattr(analyzer, "ENABLE_GUARD_1", False)
+    (tmp_path / "data").mkdir()
+    seen = {}
+
+    async def runner(cmd, stdin, cwd, timeout):
+        image_dir = Path(arg_after(cmd, "--add-dir"))
+        image_file = image_dir / "image.jpg"
+        seen["exists_during_call"] = image_file.exists()
+        seen["bytes"] = image_file.read_bytes()
+        seen["prompt_names_full_path"] = str(image_file) in stdin
+        seen["image_dir_is_outside_data"] = (tmp_path / "data") not in image_dir.parents and image_dir != tmp_path / "data"
+        return RunResult(0, ok_stdout(), "")
+
+    a = Analyzer(claude_path="C:/fake/claude.exe", model="haiku", data_dir=tmp_path / "data", runner=runner)
+    await a.analyze(IMG, ".jpg")
+    assert seen == {
+        "exists_during_call": True,
+        "bytes": IMG,
+        "prompt_names_full_path": True,
+        "image_dir_is_outside_data": True,
+    }
 
 
 # ---------- 防護 2：Prompt Injection 隔離 ----------

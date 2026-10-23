@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -124,7 +125,12 @@ class BotHandler:
                 state.remaining += 1
             else:
                 rejected = True
+                logger.warning(
+                    "佇列已滿，拒絕訊息 %s 的一張圖（排隊中 %d 張，上限看總量與每人份額）", message.id, self.queue.pending
+                )
         state.sealed = True
+        if state.remaining:
+            logger.info("訊息 %s 已排入佇列：%d 張（目前排隊中共 %d 張）", message.id, state.remaining, self.queue.pending)
 
         if rejected:
             state.symbols.add("❌")
@@ -145,6 +151,8 @@ class BotHandler:
         await self._finish_one(message, symbol)
 
     async def _process_and_reply(self, message: Any, attachment: Any) -> str:
+        started = time.monotonic()
+        logger.info("開始處理訊息 %s：附件 %s bytes", message.id, getattr(attachment, "size", "?"))
         image: bytes | None = None
         failure: str | None = None
         if getattr(attachment, "size", 0) > MAX_IMAGE_BYTES:
@@ -173,6 +181,7 @@ class BotHandler:
             symbol = result_symbol(failure_outcome("內部錯誤"))
 
         await self._reply(message, text)
+        logger.info("處理完成 訊息 %s：結果 %s，耗時 %.1f 秒", message.id, symbol, time.monotonic() - started)
         return symbol
 
     async def _finish_one(self, message: Any, symbol: str | None) -> None:
@@ -192,6 +201,7 @@ class BotHandler:
         state.finalized = True
         self._states.pop(message.id, None)
         self._deleted.discard(message.id)
+        logger.info("訊息 %s 全部處理完：貼上 %s", message.id, " ".join(s for s in RESULT_SYMBOLS if s in state.symbols) or "（無）")
         await self._safe(message.remove_reaction(HOURGLASS, self.bot_user))
         for symbol in RESULT_SYMBOLS:
             if symbol in state.symbols:

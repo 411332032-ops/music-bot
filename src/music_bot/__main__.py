@@ -46,7 +46,7 @@ def explain_startup_error(error: BaseException) -> str | None:
 
 
 def setup_logging(logs_dir: Path) -> None:
-    """log 同時印在終端機和寫進 DATA_DIR/logs/agent.log。log 只記狀態，不記 token 與完整歌詞。"""
+    """log 同時印在終端機和寫進 DATA_DIR/logs/agent.log。log 不記 token、上傳者暱稱與訊息文字。"""
     logs_dir.mkdir(parents=True, exist_ok=True)
     root = logging.getLogger()
     root.setLevel(logging.INFO)

@@ -547,3 +547,38 @@ async def test_deleted_mark_is_dropped_once_the_message_is_finished():
     await h.stop()
     assert proc.calls == []
     assert h._deleted == set()
+
+
+# ---------- log：收到、排隊、處理、完成都要有紀錄（不記訊息內容與暱稱） ----------
+
+
+async def test_queueing_processing_and_finishing_are_logged(caplog):
+    h, _ = await make()
+    m = FakeMessage(content="秘密內容", attachments=[FakeAttachment(size=2048)])
+    with caplog.at_level(logging.INFO, logger="music_bot.bot"):
+        await run(h, m)
+    text = "\n".join(caplog.messages)
+    assert f"已排入佇列" in text and str(m.id) in text
+    assert f"開始處理訊息 {m.id}" in text and "2048 bytes" in text
+    assert f"處理完成 訊息 {m.id}" in text and "✅" in text and "秒" in text
+    assert "秘密內容" not in text and "小明" not in text
+
+
+async def test_rejected_job_is_logged_as_a_warning(caplog):
+    h, _ = await make(max_total=1, max_per_user=1)
+    with caplog.at_level(logging.INFO, logger="music_bot.bot"):
+        await h.handle_message(FakeMessage())
+        second = FakeMessage()
+        await h.handle_message(second)
+        await h.queue.join()
+        await h.stop()
+    assert any(r.levelno == logging.WARNING and "拒絕" in r.getMessage() and str(second.id) in r.getMessage()
+               for r in caplog.records)
+
+
+async def test_message_finalized_is_logged_with_its_symbols(caplog):
+    h, _ = await make()
+    m = FakeMessage()
+    with caplog.at_level(logging.INFO, logger="music_bot.bot"):
+        await run(h, m)
+    assert any(f"訊息 {m.id}" in msg and "全部處理完" in msg and "✅" in msg for msg in caplog.messages)
